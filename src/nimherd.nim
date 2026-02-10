@@ -74,7 +74,7 @@ proc ensureFork(srcOwner, repo, destOrg: string): bool =
   false
 
 
-proc fetchRepos*(): JsonNode =
+proc fetchRepos*(): seq[JsonNode] =
   let c = getClient()
   proc fetchPages(urlPrefix: string): seq[JsonNode] =
     var page = 1
@@ -100,7 +100,7 @@ proc fetchRepos*(): JsonNode =
       var arr: seq[JsonNode] = @[]
       for it in j["items"]:
         arr.add it
-      return %arr
+      return arr
   if items.len == 0:
     let url = "https://api.github.com/orgs/" & Org & "/repos?per_page=100"
     let body = c.getContent(url)
@@ -109,8 +109,8 @@ proc fetchRepos*(): JsonNode =
       var arr: seq[JsonNode] = @[]
       for it in j:
         arr.add it
-      return %arr
-  %items
+      return arr
+  items
 
 
 
@@ -198,6 +198,9 @@ proc makePrs(workdir: string) =
       didChange = true
     if didChange:
       changedPkgs.add name
+  if changedPkgs.len == 0:
+    echo "No packages to update"
+    return
   let repoDir = workdir / "packages"
   discard runCmd(@["rm", "-rf", repoDir])
   var cloneUrl = "https://github.com/" & Org & "/packages.git"
@@ -226,8 +229,8 @@ proc makePrs(workdir: string) =
     let (pc, pout) = runCmd(@["git", "push", "-u", "origin", branch], repoDir)
     if pc == 0:
       let names = changedPkgs.join(", ")
-      let prTitle = if names.len > 0: "Update registry URLs for " & names else: "Update registry URLs to nim-community repos"
-      let prBody = if names.len > 0: "Set url/web to nim-community-owned repositories for: " & names else: "Set url/web to nim-community-owned repositories where applicable"
+      let prTitle = "Update registry URLs for " & names
+      let prBody = "Set url/web to nim-community-owned repositories for: " & names
       let headRef = Org & ":" & branch
       discard createPr("nim-lang", "packages", headRef, "master", prTitle, prBody)
     else:
@@ -239,8 +242,8 @@ proc makePrs(workdir: string) =
         let (pc2, pout2) = runCmd(@["git", "push", "--force-with-lease", "-u", "origin", branch], repoDir)
         if pc2 == 0:
           let names = changedPkgs.join(", ")
-          let prTitle = if names.len > 0: "Update registry URLs for " & names else: "Update registry URLs to nim-community repos"
-          let prBody = if names.len > 0: "Set url/web to nim-community-owned repositories for: " & names else: "Set url/web to nim-community-owned repositories where applicable"
+          let prTitle = "Update registry URLs for " & names
+          let prBody = "Set url/web to nim-community-owned repositories for: " & names
           let headRef = Org & ":" & branch
           discard createPr("nim-lang", "packages", headRef, "master", prTitle, prBody)
         else:
@@ -263,7 +266,7 @@ proc outputList() =
   echo pretty filteredRepos
 
 
-proc dryRun(path: string) =
+proc dryRun() =
   let repos = fetchRepos()
   var pkgs: JsonNode = newJArray()
   let c = getClient()
