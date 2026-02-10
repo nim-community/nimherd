@@ -28,26 +28,29 @@ proc storePackagesInDb(packages: JsonNode) =
       db.put(doc)
 
 proc getChangedPackagesFromDb(repos: seq[JsonNode]): seq[string] =
+  ## Returns a list of package names that have changed URLs in the database.
   if db.isNil:
     db = initDatabase()
   
   result = @[]
   for repo in repos:
     let repoName = repo["name"].getStr
+    let pkgName = repoName.split(".")[0]
+
     let repoUrl = repo["html_url"].getStr
     
     # Query for existing package with this name
-    let existing = db.query().where("name", "==", repoName).where("type", "==", "package").get()
+    let existing = db.query().where("name", "==", pkgName).where("type", "==", "package").get()
     
     if existing.isNil:
       # New package
-      result.add(repoName)
+      result.add(pkgName)
     else:
       # Check if URL changed
       let oldUrl = if existing.hasKey("url"): existing["url"].getStr else: ""
       let oldWeb = if existing.hasKey("web"): existing["web"].getStr else: ""
       if oldUrl != repoUrl or oldWeb != repoUrl:
-        result.add(repoName)
+        result.add(pkgName)
 
 const Org = "nim-community"
 
@@ -157,17 +160,23 @@ proc makePrs(workdir: string) =
   if changedPkgs.len == 0:
     echo "No packages to update"
     return
+  echo changedPkgs
+
+  for r in repos:
+    echo r["name"].getStr
+    echo r["html_url"].getStr
 
   # Update the packages JSON with new URLs
   for i in 0 ..< pkgs.len:
 
     if "url" in pkgs[i]:
       let url = pkgs[i]["url"].getStr
-      let name = url.split("/")[^1]  # Get last part of URL
-      if name in changedPkgs:
+      let repoName = url.split("/")[^1]  # Get last part of URL
+      let pkgName = repoName.split(".")[0]
+      if pkgName in changedPkgs:
         var html = ""
         for r in repos:
-          if r["name"].getStr == name:
+          if r["name"].getStr.split(".")[0] == pkgName:
             html = r["html_url"].getStr
             break
         if html.len > 0:
