@@ -16,9 +16,8 @@ proc initDatabase(): SimpleDB =
 proc storePackagesInDb(packages: JsonNode) =
   if db.isNil:
     db = initDatabase()
-  defer: db.close()
+  # defer: db.close()
   # Clear existing packages
-  db.query().remove()
   
   # Store each package as a document
   for pkg in packages:
@@ -29,7 +28,7 @@ proc getChangedPackagesFromDb(forkedRepos: seq[JsonNode]): seq[string] =
   ## Returns a list of package names that have changed URLs in the database.
   if db.isNil:
     db = initDatabase()
-  defer: db.close()
+  # defer: db.close()
   for forkedRepo in forkedRepos:
     let repoName = forkedRepo["name"].getStr
     let pkgName = repoName.split(".")[0]
@@ -90,7 +89,7 @@ proc makePrs() =
   pkgs = parseJson(body)
   
   # Store packages in SimpleDB
-  storePackagesInDb(pkgs)
+  storePackagesInDb(pkgs.copy)
   
   # Get changed packages using SimpleDB query
   let changedPkgs = getChangedPackagesFromDb(repos)
@@ -192,7 +191,7 @@ proc dryRun() =
   pkgs = parseJson(body)
   let original = pkgs.pretty.cleanupWhitespace
   # Store packages in SimpleDB
-  storePackagesInDb(pkgs)
+  storePackagesInDb(pkgs.copy)
   
   # Get changed packages using SimpleDB query
   let changedPkgs = getChangedPackagesFromDb(repos)
@@ -247,6 +246,7 @@ proc dryRun() =
 
 
 proc run() =
+  removeFile("packages.db")
   makePrs()
 
 when isMainModule:
