@@ -84,20 +84,6 @@ Creates pull requests for packages that have been updated.
 3. **URL Updates**: For packages that exist in nim-community, updates their URLs to point to the community-owned repositories
 4. **Pull Request Creation**: Creates pull requests to the main Nim packages repository with the updated information
 
-## Configuration
-
-The tool uses these constants (defined in the source):
-- `Org`: The target organization (default: "nim-community")
-- Various GitHub API endpoints for repository management
-
-## API Reference
-
-### Key Procedures
-
-- `fetchRepos*()`: Fetch repositories from nim-community organization
-- `ensureFork(srcOwner, repo, destOrg)`: Ensure a repository exists as a fork
-- `updateUrls(nimblePath, newUrl)`: Update URLs in .nimble files
-- `createPr(owner, repo, head, base, title, body)`: Create pull requests
 
 ## Contributing
 
