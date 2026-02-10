@@ -16,12 +16,6 @@ NimHerd is like a digital shepherd for Nim packages - it helps gather and migrat
 ## Installation
 
 ```bash
-nimble install nimherd
-```
-
-Or build from source:
-
-```bash
 # Clone the repository
 git clone https://github.com/nim-community/nimherd
 cd nimherd
