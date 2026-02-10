@@ -1,8 +1,53 @@
 
-import std/[httpclient, json, strutils, os, osproc, uri, sequtils, streams, tables]
+import std/[httpclient, json, strutils, os, osproc, sequtils, tables, times]
 import diff
 import dotenv
 import cligen
+import simpledb
+import nimherd/[githubapi,pretty_json]
+
+var db: SimpleDB
+
+proc initDatabase(): SimpleDB =
+  result = SimpleDB.init("packages.db")
+
+proc storePackagesInDb(packages: JsonNode) =
+  if db.isNil:
+    db = initDatabase()
+  
+  # Clear existing packages
+  db.query().where("type", "==", "package").remove()
+  
+  # Store each package as a document
+  for i in 0 ..< packages.len:
+    let pkg = packages[i]
+    if pkg.hasKey("name"):
+      var doc = pkg.copy() # avoid mutating original
+      doc["type"] = %"package"
+      doc["stored_at"] = %getTime().toUnix
+      db.put(doc)
+
+proc getChangedPackagesFromDb(repos: seq[JsonNode]): seq[string] =
+  if db.isNil:
+    db = initDatabase()
+  
+  result = @[]
+  for repo in repos:
+    let repoName = repo["name"].getStr
+    let repoUrl = repo["html_url"].getStr
+    
+    # Query for existing package with this name
+    let existing = db.query().where("name", "==", repoName).where("type", "==", "package").get()
+    
+    if existing.isNil:
+      # New package
+      result.add(repoName)
+    else:
+      # Check if URL changed
+      let oldUrl = if existing.hasKey("url"): existing["url"].getStr else: ""
+      let oldWeb = if existing.hasKey("web"): existing["web"].getStr else: ""
+      if oldUrl != repoUrl or oldWeb != repoUrl:
+        result.add(repoName)
 
 const Org = "nim-community"
 
@@ -16,17 +61,6 @@ proc runCmd(args: seq[string], cwd = ""): (int, string) =
   let res = execCmdEx(cmd)
   return (res.exitCode, res.output)
 
-proc getToken(): string =
-  result = getEnv("GITHUB_TOKEN")
-
-proc getClient(): HttpClient =
-  let c = newHttpClient()
-  let t = getToken()
-  if t.len > 0:
-    c.headers = newHttpHeaders({"Authorization": "Bearer " & t, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "nimherd"})
-  else:
-    c.headers = newHttpHeaders({"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "nimherd"})
-  c
 
 proc nimbleCandidates(repoName: string): seq[string] =
   var cands: seq[string] = @[]
@@ -49,33 +83,9 @@ proc nimbleCandidates(repoName: string): seq[string] =
     if not (s in result):
       result.add s
 
-proc repoExists(owner, repo: string): bool =
-  let c = getClient()
-  let resp = c.request("https://api.github.com/repos/" & owner & "/" & repo)
-  result = resp.code.is2xx
-
-proc ensureFork(srcOwner, repo, destOrg: string): bool =
-  if repoExists(destOrg, repo):
-    return true
-  let c = getClient()
-  let payload = %*{"organization": destOrg}
-  let resp = c.request("https://api.github.com/repos/" & srcOwner & "/" & repo & "/forks", httpMethod=HttpPost, body = $payload)
-  if not resp.code.is2xx:
-    echo "Fork request failed with status " & $resp.code
-    let bs = resp.bodyStream
-    if bs != nil:
-      let eb = bs.readAll()
-      if eb.len > 0:
-        echo eb
-  for _ in 0..9:
-    if repoExists(destOrg, repo):
-      return true
-    sleep(1000)
-  false
-
 
 proc fetchRepos*(): seq[JsonNode] =
-  let c = getClient()
+  let c = githubapi.getClient()
   proc fetchPages(urlPrefix: string): seq[JsonNode] =
     var page = 1
     var items: seq[JsonNode] = @[]
@@ -91,27 +101,9 @@ proc fetchRepos*(): seq[JsonNode] =
         items.add r
       inc page
     items
-  var items = fetchPages("https://api.github.com/orgs/" & Org & "/repos?per_page=100")
-  if items.len == 0:
-    let url = "https://api.github.com/search/repositories?q=user:" & Org & "&per_page=100"
-    let body = c.getContent(url)
-    let j = parseJson(body)
-    if j.hasKey("items") and j["items"].kind == JArray:
-      var arr: seq[JsonNode] = @[]
-      for it in j["items"]:
-        arr.add it
-      return arr
-  if items.len == 0:
-    let url = "https://api.github.com/orgs/" & Org & "/repos?per_page=100"
-    let body = c.getContent(url)
-    let j = parseJson(body)
-    if j.kind == JArray:
-      var arr: seq[JsonNode] = @[]
-      for it in j:
-        arr.add it
-      return arr
-  items
-
+  
+  result = fetchPages("https://api.github.com/orgs/" & Org & "/repos?per_page=100")
+  echo "Fetched " & $result.len & " repositories"
 
 
 proc updateUrls*(nimblePath: string, newUrl: string): bool =
@@ -146,113 +138,97 @@ proc updateUrls*(nimblePath: string, newUrl: string): bool =
     writeFile(nimblePath, lines.join("\n"))
   changed
 
-proc createPr(org, repo, head, base, title, body: string): bool =
-  let c = getClient()
-  let url = "https://api.github.com/repos/" & org & "/" & repo & "/pulls"
-  let payload = %*{"title": title, "head": head, "base": base, "body": body}
-  let resp = c.request(url, httpMethod=HttpPost, body = $payload)
-  if resp.code.is2xx:
-    let bs = resp.bodyStream
-    if bs != nil:
-      let s = bs.readAll()
-      if s.len > 0:
-        let j = parseJson(s)
-        if j.kind == JObject and j.hasKey("html_url"):
-          echo j["html_url"].getStr
-    result = true
-  else:
-    echo "PR creation failed with status " & $resp.code
-    let bs = resp.bodyStream
-    if bs != nil:
-      let s = bs.readAll()
-      if s.len > 0:
-        echo s
-    result = false
 
 proc makePrs(workdir: string) =
   createDir(workdir)
   let repos = fetchRepos()
+
   var pkgs: JsonNode = newJArray()
-  let c = getClient()
+  let c = githubapi.getClient()
   let body = c.getContent("https://cdn.jsdelivr.net/gh/nim-lang/packages@master/packages.json")
   pkgs = parseJson(body)
+  
+  # Store packages in SimpleDB
+  storePackagesInDb(pkgs)
+  
+  # Get changed packages using SimpleDB query
+  let changedPkgs = getChangedPackagesFromDb(repos)
 
-  var changedPkgs: seq[string] = @[]
-  for i in 0 ..< pkgs.len:
-    let name = pkgs[i]["name"].getStr
-    var html = ""
-    for r in repos:
-      if r["name"].getStr == name:
-        html = r["html_url"].getStr
-        break
-    if html.len == 0:
-      continue
-    let oldUrl = if pkgs[i].hasKey("url"): pkgs[i]["url"].getStr else: ""
-    let oldWeb = if pkgs[i].hasKey("web"): pkgs[i]["web"].getStr else: ""
-    var didChange = false
-    if oldUrl != html:
-      pkgs[i]["url"] = %html
-      didChange = true
-    if oldWeb != html:
-      pkgs[i]["web"] = %html
-      didChange = true
-    if didChange:
-      changedPkgs.add name
   if changedPkgs.len == 0:
     echo "No packages to update"
     return
-  let repoDir = workdir / "packages"
-  discard runCmd(@["rm", "-rf", repoDir])
-  var cloneUrl = "https://github.com/" & Org & "/packages.git"
-  let token = getToken()
-  if token.len > 0:
-    if not ensureFork("nim-lang", "packages", Org):
-      echo "Failed to fork nim-lang/packages for org '" & Org & "'"
-      quit(1)
-    cloneUrl = "https://x-access-token:" & token & "@github.com/" & Org & "/packages.git"
-  let (gc, gout) = runCmd(@["git", "clone", cloneUrl, repoDir])
-  if gc != 0:
-    echo "git clone failed with exit code " & $gc
-    if gout.len > 0:
-      echo gout
+
+  # Update the packages JSON with new URLs
+  for i in 0 ..< pkgs.len:
+
+    if "url" in pkgs[i]:
+      let url = pkgs[i]["url"].getStr
+      let name = url.split("/")[^1]  # Get last part of URL
+      if name in changedPkgs:
+        var html = ""
+        for r in repos:
+          if r["name"].getStr == name:
+            html = r["html_url"].getStr
+            break
+        if html.len > 0:
+          pkgs[i]["url"] = %html
+          pkgs[i]["web"] = %html
+  # Use GitHub API to create/update the packages.json file
+  let branch = "update-nim-community-urls-" & changedPkgs.join("-")
+  let message = "Update registry URLs to nim-community repos"
+  
+  # Ensure fork exists
+  if not githubapi.ensureFork("nim-lang", "packages", Org):
+    echo "Failed to fork nim-lang/packages for org '" & Org & "'"
     quit(1)
-  let pkgPath = repoDir / "packages.json"
-  writeFile(pkgPath, $pkgs)
-  let branch = "update-nim-community-urls"
-  if token.len > 0:
-    discard runCmd(@["git", "remote", "set-url", "origin", cloneUrl], repoDir)
-  discard runCmd(@["git", "checkout", "master"], repoDir)
-  discard runCmd(@["git", "checkout", "-b", branch], repoDir)
-  discard runCmd(@["git", "add", pkgPath], repoDir)
-  let (cc, cout) = runCmd(@["git", "commit", "-m", "Update registry URLs to nim-community repos"], repoDir)
-  if cc == 0:
-    let (pc, pout) = runCmd(@["git", "push", "-u", "origin", branch], repoDir)
-    if pc == 0:
-      let names = changedPkgs.join(", ")
-      let prTitle = "Update registry URLs for " & names
-      let prBody = "Set url/web to nim-community-owned repositories for: " & names
-      let headRef = Org & ":" & branch
-      discard createPr("nim-lang", "packages", headRef, "master", prTitle, prBody)
-    else:
-      echo "git push failed with exit code " & $pc
-      if pout.len > 0:
-        echo pout
-      if pout.contains("non-fast-forward"):
-        discard runCmd(@["git", "pull", "--rebase", "origin", branch], repoDir)
-        let (pc2, pout2) = runCmd(@["git", "push", "--force-with-lease", "-u", "origin", branch], repoDir)
-        if pc2 == 0:
-          let names = changedPkgs.join(", ")
-          let prTitle = "Update registry URLs for " & names
-          let prBody = "Set url/web to nim-community-owned repositories for: " & names
-          let headRef = Org & ":" & branch
-          discard createPr("nim-lang", "packages", headRef, "master", prTitle, prBody)
-        else:
-          if pout2.len > 0:
-            echo pout2
+  
+  # Get current master branch SHA
+  let masterRef = githubapi.getRef(Org, "packages", "heads/master")
+  if masterRef.isNil:
+    echo "Failed to get master branch reference"
+    quit(1)
+  
+  let masterSha = masterRef["object"]["sha"].getStr
+
+  # Create new branch
+  let branchRef = "refs/heads/" & branch
+  
+  # Check if branch already exists
+  if githubapi.branchExists(Org, "packages", branch):
+    echo "Branch " & branch & " already exists, skipping creation"
   else:
-    echo "No changes to commit (" & $changedPkgs.len & " packages updated in memory)"
-    if cout.len > 0:
-      echo cout
+    if not githubapi.createRef(Org, "packages", branchRef, masterSha):
+      echo "Failed to create branch " & branch
+      quit(1)
+  
+  # Get current packages.json file
+  let (currentContent, fileSha) = githubapi.getFileContents(Org, "packages", "packages.json", "master")
+  writeFile(workdir / "packages.json", currentContent)
+  # Update packages.json
+  let updatedContent = pkgs.pretty.cleanupWhitespace
+  writeFile(workdir / "updated-packages.json", updatedContent)
+  var success = false
+  if currentContent.len > 0:
+    if currentContent != updatedContent:
+      success = githubapi.updateFileContents(Org, "packages", "packages.json", message, updatedContent, fileSha, branch)
+      if not success:
+        echo "Failed to update packages.json"
+        quit(1)
+    else:
+      discard
+  else:
+    success = githubapi.createFileContents(Org, "packages", "packages.json", message, updatedContent, branch)
+    if not success:
+      echo "Failed to create packages.json"
+      quit(1)
+  
+  
+  # Create PR
+  let names = changedPkgs.join(", ")
+  let prTitle = "Update registry URLs for " & names
+  let prBody = "Set url/web to nim-community-owned repositories for: " & names
+  let headRef = Org & ":" & branch
+  discard githubapi.createPr("nim-lang", "packages", headRef, "master", prTitle, prBody)
 
 proc outputList() =
   let repos = fetchRepos()
@@ -263,13 +239,13 @@ proc outputList() =
       filteredRepo["name"] = repo["name"]
       filteredRepo["html_url"] = repo["html_url"]
       filteredRepos.add(filteredRepo)
-  echo pretty filteredRepos
+  echo  filteredRepos.pretty.cleanupWhitespace
 
 
 proc dryRun() =
   let repos = fetchRepos()
   var pkgs: JsonNode = newJArray()
-  let c = getClient()
+  let c = githubapi.getClient()
   let body = c.getContent("https://cdn.jsdelivr.net/gh/nim-lang/packages@master/packages.json")
   pkgs = parseJson(body)
 
@@ -319,8 +295,8 @@ proc dryRun() =
   createDir(tmp)
   let origPath = tmp / "packages_orig.json"
   let newPath = tmp / "packages_new.json"
-  writeFile(origPath, pkgs.pretty)
-  writeFile(newPath, pkgsNew.pretty)
+  writeFile(origPath, pkgs.pretty.cleanupWhitespace)
+  writeFile(newPath, pkgsNew.pretty.cleanupWhitespace)
   let a = readFile(origPath).splitLines()
   let b = readFile(newPath).splitLines()
   var any = false

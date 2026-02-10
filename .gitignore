@@ -4,6 +4,7 @@
 nimbledeps/
 _work_nim_community/
 output.json
+*.db
 tests/data/output.json
 *.rdb
 !Dockerfile

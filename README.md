@@ -40,6 +40,11 @@ You'll need a GitHub personal access token with appropriate permissions. Set it 
 ```bash
 export GITHUB_TOKEN=your_github_token_here
 ```
+The fine-grained token must have the following permission set:  
+
+"Contents"  
+
+"Pull requests" repository permissions (write)
 
 ### Commands
 
