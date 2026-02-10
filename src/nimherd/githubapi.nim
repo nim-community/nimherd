@@ -15,6 +15,27 @@ proc repoExists*(owner, repo: string): bool =
   let resp = c.request("https://api.github.com/repos/" & owner & "/" & repo)
   result = resp.code.is2xx
 
+proc fetchRepos*(owner: string): seq[JsonNode] =
+  ## fetch all repositories of the given owner
+  let c = githubapi.getClient()
+  proc fetchPages(urlPrefix: string): seq[JsonNode] =
+    var page = 1
+    var items: seq[JsonNode] = @[]
+    while true:
+      let url = urlPrefix & "&page=" & $page
+      let body = c.getContent(url)
+      let j = parseJson(body)
+      if j.kind != JArray:
+        break
+      if j.len == 0:
+        break
+      for r in j:
+        items.add r
+      inc page
+    items
+  
+  result = fetchPages("https://api.github.com/orgs/" & owner & "/repos?per_page=100")
+
 proc ensureFork*(srcOwner, repo, destOrg: string): bool =
   if repoExists(destOrg, repo):
     return true

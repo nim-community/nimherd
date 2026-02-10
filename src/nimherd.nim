@@ -1,10 +1,13 @@
 
-import std/[httpclient, json, strutils, os, osproc, sequtils, tables, times]
+import std/[httpclient, json, strutils, os, tables]
 import diff
 import dotenv
 import cligen
 import simpledb
 import nimherd/[githubapi,pretty_json]
+
+const Org = "nim-community"
+
 
 var db: SimpleDB
 
@@ -14,99 +17,40 @@ proc initDatabase(): SimpleDB =
 proc storePackagesInDb(packages: JsonNode) =
   if db.isNil:
     db = initDatabase()
-  
+  defer: db.close()
   # Clear existing packages
-  db.query().where("type", "==", "package").remove()
+  db.query().remove()
   
   # Store each package as a document
   for i in 0 ..< packages.len:
     let pkg = packages[i]
     if pkg.hasKey("name"):
       var doc = pkg.copy() # avoid mutating original
-      doc["type"] = %"package"
-      doc["stored_at"] = %getTime().toUnix
+
       db.put(doc)
 
-proc getChangedPackagesFromDb(repos: seq[JsonNode]): seq[string] =
+proc getChangedPackagesFromDb(forkedRepos: seq[JsonNode]): seq[string] =
   ## Returns a list of package names that have changed URLs in the database.
   if db.isNil:
     db = initDatabase()
-  
-  result = @[]
-  for repo in repos:
-    let repoName = repo["name"].getStr
+  defer: db.close()
+  for forkedRepo in forkedRepos:
+    let repoName = forkedRepo["name"].getStr
     let pkgName = repoName.split(".")[0]
-
-    let repoUrl = repo["html_url"].getStr
+    let repoUrl = forkedRepo["html_url"].getStr
     
     # Query for existing package with this name
-    let existing = db.query().where("name", "==", pkgName).where("type", "==", "package").get()
-    
-    if existing.isNil:
-      # New package
-      result.add(pkgName)
+    let orig = db.query().where("name", "==", pkgName).get()
+
+    if orig.isNil:
+      # forked repos that not in nim official packages.json
+      discard
     else:
       # Check if URL changed
-      let oldUrl = if existing.hasKey("url"): existing["url"].getStr else: ""
-      let oldWeb = if existing.hasKey("web"): existing["web"].getStr else: ""
+      let oldUrl = if orig.hasKey("url"): orig["url"].getStr else: ""
+      let oldWeb = if orig.hasKey("web"): orig["web"].getStr else: ""
       if oldUrl != repoUrl or oldWeb != repoUrl:
         result.add(pkgName)
-
-const Org = "nim-community"
-
-proc shellQuote(s: string): string =
-  "\"" & s.replace("\"", "\\\"") & "\""
-
-proc runCmd(args: seq[string], cwd = ""): (int, string) =
-  var cmd = args.mapIt(shellQuote(it)).join(" ")
-  if cwd.len > 0:
-    cmd = "cd " & shellQuote(cwd) & " && " & cmd
-  let res = execCmdEx(cmd)
-  return (res.exitCode, res.output)
-
-
-proc nimbleCandidates(repoName: string): seq[string] =
-  var cands: seq[string] = @[]
-  let base = repoName
-  let lower = base.toLowerAscii
-  let stripped = if lower.endsWith(".nim"): lower[0..lower.len-5] else: lower
-  let altPrefix = if stripped.startsWith("nim-"): stripped[4..^1] else: stripped
-  let altSuffix = if stripped.endsWith("-nim"): stripped[0..stripped.len-5] else: stripped
-  proc addVariant(s: string) =
-    if s.len > 0:
-      cands.add s
-      cands.add s.replace("-", "_")
-      cands.add s.replace("_", "-")
-  addVariant(lower)
-  addVariant(stripped)
-  addVariant(altPrefix)
-  addVariant(altSuffix)
-  result = @[]
-  for s in cands:
-    if not (s in result):
-      result.add s
-
-
-proc fetchRepos*(): seq[JsonNode] =
-  let c = githubapi.getClient()
-  proc fetchPages(urlPrefix: string): seq[JsonNode] =
-    var page = 1
-    var items: seq[JsonNode] = @[]
-    while true:
-      let url = urlPrefix & "&page=" & $page
-      let body = c.getContent(url)
-      let j = parseJson(body)
-      if j.kind != JArray:
-        break
-      if j.len == 0:
-        break
-      for r in j:
-        items.add r
-      inc page
-    items
-  
-  result = fetchPages("https://api.github.com/orgs/" & Org & "/repos?per_page=100")
-  echo "Fetched " & $result.len & " repositories"
 
 
 proc updateUrls*(nimblePath: string, newUrl: string): bool =
@@ -144,7 +88,7 @@ proc updateUrls*(nimblePath: string, newUrl: string): bool =
 
 proc makePrs(workdir: string) =
   createDir(workdir)
-  let repos = fetchRepos()
+  let repos = fetchRepos(Org)
 
   var pkgs: JsonNode = newJArray()
   let c = githubapi.getClient()
@@ -160,11 +104,6 @@ proc makePrs(workdir: string) =
   if changedPkgs.len == 0:
     echo "No packages to update"
     return
-  echo changedPkgs
-
-  for r in repos:
-    echo r["name"].getStr
-    echo r["html_url"].getStr
 
   # Update the packages JSON with new URLs
   for i in 0 ..< pkgs.len:
@@ -240,7 +179,8 @@ proc makePrs(workdir: string) =
   discard githubapi.createPr("nim-lang", "packages", headRef, "master", prTitle, prBody)
 
 proc outputList() =
-  let repos = fetchRepos()
+  ## list nim-community repositories
+  let repos = fetchRepos(Org)
   var filteredRepos = newJArray()
   for repo in repos:
     if repo.hasKey("name") and repo.hasKey("html_url"):
@@ -252,60 +192,42 @@ proc outputList() =
 
 
 proc dryRun() =
-  let repos = fetchRepos()
+  let repos = fetchRepos(Org)
   var pkgs: JsonNode = newJArray()
   let c = githubapi.getClient()
   let body = c.getContent("https://cdn.jsdelivr.net/gh/nim-lang/packages@master/packages.json")
   pkgs = parseJson(body)
+  let original = pkgs.pretty.cleanupWhitespace
+  # Store packages in SimpleDB
+  storePackagesInDb(pkgs)
+  
+  # Get changed packages using SimpleDB query
+  let changedPkgs = getChangedPackagesFromDb(repos)
 
+  # Update the packages JSON with new URLs
+  for i in 0 ..< pkgs.len:
 
-  var pkgsNew = pkgs.copy()
-  for r in repos:
-    let name = r["name"].getStr
-    let html = r["html_url"].getStr
-    var idx = -1
-    for i in 0 ..< pkgsNew.len:
-      if pkgsNew[i].hasKey("name") and pkgsNew[i]["name"].getStr == name:
-        idx = i
-        break
-    if idx < 0:
-      for cand in nimbleCandidates(name):
-        for i in 0 ..< pkgsNew.len:
-          if pkgsNew[i].hasKey("name") and pkgsNew[i]["name"].getStr == cand:
-            idx = i
+    if "url" in pkgs[i]:
+      let url = pkgs[i]["url"].getStr
+      let repoName = url.split("/")[^1]  # Get last part of URL
+      let pkgName = repoName.split(".")[0]
+      if pkgName in changedPkgs:
+        var html = ""
+        for r in repos:
+          if r["name"].getStr.split(".")[0] == pkgName:
+            html = r["html_url"].getStr
             break
-        if idx >= 0:
-          break
-    if idx < 0:
-      let suf1 = "/" & name
-      let strippedName = if name.endsWith(".nim"): name[0..name.len-5] else: name
-      let suf2 = "/" & strippedName
-      for i in 0 ..< pkgsNew.len:
-        var matched = false
-        if pkgsNew[i].hasKey("url"):
-          let u = pkgsNew[i]["url"].getStr
-          if u.endsWith(suf1) or u.endsWith(suf2):
-            matched = true
-        if not matched and pkgsNew[i].hasKey("web"):
-          let w = pkgsNew[i]["web"].getStr
-          if w.endsWith(suf1) or w.endsWith(suf2):
-            matched = true
-        if matched:
-          idx = i
-          break
-    if idx >= 0:
-      if not pkgsNew[idx].hasKey("url") or pkgsNew[idx]["url"].getStr != html:
-        pkgsNew[idx]["url"] = %html
-      if not pkgsNew[idx].hasKey("web") or pkgsNew[idx]["web"].getStr != html:
-        pkgsNew[idx]["web"] = %html
+        if html.len > 0:
+          pkgs[i]["url"] = %html
+          pkgs[i]["web"] = %html
 
   let tmp = getTempDir() / "nim_packages_dry_run_json"
-  discard runCmd(@["rm", "-rf", tmp])
+  removeDir(tmp)
   createDir(tmp)
   let origPath = tmp / "packages_orig.json"
   let newPath = tmp / "packages_new.json"
-  writeFile(origPath, pkgs.pretty.cleanupWhitespace)
-  writeFile(newPath, pkgsNew.pretty.cleanupWhitespace)
+  writeFile(origPath, original)
+  writeFile(newPath, pkgs.pretty.cleanupWhitespace)
   let a = readFile(origPath).splitLines()
   let b = readFile(newPath).splitLines()
   var any = false

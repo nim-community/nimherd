@@ -1,6 +1,4 @@
 
-import strutils, json, os
-
 proc cleanupWhitespace*(s: string): string =
   ## Removes trailing whitespace and normalizes line endings to LF.
   result = newStringOfCap(s.len)
