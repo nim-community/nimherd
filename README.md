@@ -1,5 +1,4 @@
-# NimHerd 🐑
-
+# NimHerd 🐑  ![Test](https://github.com/nim-community/nimherd/actions/workflows/test.yml/badge.svg)
 A tool for managing and migrating Nim packages to community ownership.
 
 ## Overview
@@ -23,14 +22,18 @@ nimble install nimherd
 Or build from source:
 
 ```bash
-git clone https://github.com/bung87/nimherd
+# Clone the repository
+git clone https://github.com/nim-community/nimherd
 cd nimherd
 nimble build
 ```
 
 ## Usage
 
-### Prerequisites
+### GitHub Token Setup
+Create a GitHub personal access token with the following permissions:
+- `repo` (Full repository access)
+- `workflow` (Update GitHub Action workflows)
 
 You'll need a GitHub personal access token with appropriate permissions. Set it as an environment variable:
 
@@ -42,9 +45,9 @@ export GITHUB_TOKEN=your_github_token_here
 
 #### List Repositories
 ```bash
-nimherd list [output_file]
+nimherd list 
 ```
-Lists all repositories in the nim-community organization. Optionally saves to a file.
+Lists all repositories in the nim-community organization.
 
 #### Dry Run
 ```bash
@@ -54,14 +57,14 @@ Performs a dry run to show what changes would be made without actually executing
 
 #### Run Migration
 ```bash
-nimherd run [work_directory] [--only=package1,package2]
+nimherd run [work_directory]
 ```
 Executes the full migration process:
 1. Forks repositories to nim-community organization if needed
 2. Updates package registry URLs
 3. Creates pull requests with the changes
 
-Use `--only` to process specific packages.
+
 
 #### Create Pull Requests
 ```bash
@@ -98,4 +101,3 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 ## License
 
 MIT License - see the LICENSE file for details.
-# nimherd
