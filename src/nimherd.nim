@@ -8,7 +8,6 @@ import nimherd/[githubapi,pretty_json]
 
 const Org = "nim-community"
 
-
 var db: SimpleDB
 
 proc initDatabase(): SimpleDB =
@@ -22,12 +21,9 @@ proc storePackagesInDb(packages: JsonNode) =
   db.query().remove()
   
   # Store each package as a document
-  for i in 0 ..< packages.len:
-    let pkg = packages[i]
+  for pkg in packages:
     if pkg.hasKey("name"):
-      var doc = pkg.copy() # avoid mutating original
-
-      db.put(doc)
+      db.put(pkg)
 
 proc getChangedPackagesFromDb(forkedRepos: seq[JsonNode]): seq[string] =
   ## Returns a list of package names that have changed URLs in the database.
@@ -86,10 +82,8 @@ proc updateUrls*(nimblePath: string, newUrl: string): bool =
   changed
 
 
-proc makePrs(workdir: string) =
-  createDir(workdir)
+proc makePrs() =
   let repos = fetchRepos(Org)
-
   var pkgs: JsonNode = newJArray()
   let c = githubapi.getClient()
   let body = c.getContent("https://cdn.jsdelivr.net/gh/nim-lang/packages@master/packages.json")
@@ -107,7 +101,6 @@ proc makePrs(workdir: string) =
 
   # Update the packages JSON with new URLs
   for i in 0 ..< pkgs.len:
-
     if "url" in pkgs[i]:
       let url = pkgs[i]["url"].getStr
       let repoName = url.split("/")[^1]  # Get last part of URL
@@ -151,10 +144,10 @@ proc makePrs(workdir: string) =
   
   # Get current packages.json file
   let (currentContent, fileSha) = githubapi.getFileContents(Org, "packages", "packages.json", "master")
-  writeFile(workdir / "packages.json", currentContent)
+
   # Update packages.json
   let updatedContent = pkgs.pretty.cleanupWhitespace
-  writeFile(workdir / "updated-packages.json", updatedContent)
+
   var success = false
   if currentContent.len > 0:
     if currentContent != updatedContent:
@@ -206,7 +199,6 @@ proc dryRun() =
 
   # Update the packages JSON with new URLs
   for i in 0 ..< pkgs.len:
-
     if "url" in pkgs[i]:
       let url = pkgs[i]["url"].getStr
       let repoName = url.split("/")[^1]  # Get last part of URL
@@ -254,9 +246,8 @@ proc dryRun() =
     echo "No differences in packages.json"
 
 
-proc run(workdir = getCurrentDir() / "_work_nim_community") =
-  createDir(workdir)
-  makePrs(workdir)
+proc run() =
+  makePrs()
 
 when isMainModule:
   dotenv.load()
@@ -264,5 +255,4 @@ when isMainModule:
     [outputList, cmdName = "list"],
     [run, cmdName = "run"],
     [dryRun, cmdName = "dry-run"],
-    [makePrs, cmdName = "makePrs"]
   )
