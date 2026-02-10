@@ -56,13 +56,13 @@ Lists all repositories in the nim-community organization.
 
 #### Dry Run
 ```bash
-nimherd dry-run [work_directory]
+nimherd dry-run
 ```
 Performs a dry run to show what changes would be made without actually executing them.
 
 #### Run Migration
 ```bash
-nimherd run [work_directory]
+nimherd run
 ```
 Executes the full migration process:
 1. Forks repositories to nim-community organization if needed
@@ -73,9 +73,9 @@ Executes the full migration process:
 
 #### Create Pull Requests
 ```bash
-nimherd makePrs [work_directory]
+nimherd makePrs
 ```
-Creates pull requests for packages that have been updated in the working directory.
+Creates pull requests for packages that have been updated.
 
 ## How It Works
 
