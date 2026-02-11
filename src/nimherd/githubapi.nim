@@ -56,6 +56,22 @@ proc ensureFork*(srcOwner, repo, destOrg: string): bool =
     sleep(1000)
   false
 
+proc syncFork*(owner, repo: string, branch = "main"): bool =
+  ## sync a fork with its upstream repository
+  let c = getClient()
+  let url = "https://api.github.com/repos/" & owner & "/" & repo & "/merge-upstream"
+  let payload = %*{"branch": branch}
+  let resp = c.request(url, httpMethod=HttpPost, body = $payload)
+  result = resp.code.is2xx
+  if not result:
+    echo "Failed to sync fork " & owner & "/" & repo & ": " & $resp.code
+    if resp.bodyStream != nil:
+      var s = ""
+      while not resp.bodyStream.atEnd:
+        s.add(readStr(resp.bodyStream, 1024))
+      if s.len > 0:
+        echo s
+
 proc createPr*(org, repo, head, base, title, body: string): bool =
   let c = getClient()
   let url = "https://api.github.com/repos/" & org & "/" & repo & "/pulls"

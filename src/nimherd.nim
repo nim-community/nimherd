@@ -16,9 +16,9 @@ proc initDatabase(): SimpleDB =
 proc storePackagesInDb(packages: JsonNode) =
   if db.isNil:
     db = initDatabase()
-  # defer: db.close()
+  defer: db.close()
   # Clear existing packages
-  
+
   # Store each package as a document
   for pkg in packages:
     if pkg.hasKey("name"):
@@ -28,12 +28,12 @@ proc getChangedPackagesFromDb(forkedRepos: seq[JsonNode]): seq[string] =
   ## Returns a list of package names that have changed URLs in the database.
   if db.isNil:
     db = initDatabase()
-  # defer: db.close()
+  defer: db.close()
   for forkedRepo in forkedRepos:
     let repoName = forkedRepo["name"].getStr
     let pkgName = repoName.split(".")[0]
     let repoUrl = forkedRepo["html_url"].getStr
-    
+
     # Query for existing package with this name
     let orig = db.query().where("name", "==", pkgName).get()
 
@@ -87,10 +87,10 @@ proc makePrs() =
   let c = githubapi.getClient()
   let body = c.getContent("https://cdn.jsdelivr.net/gh/nim-lang/packages@master/packages.json")
   pkgs = parseJson(body)
-  
+
   # Store packages in SimpleDB
   storePackagesInDb(pkgs.copy)
-  
+
   # Get changed packages using SimpleDB query
   let changedPkgs = getChangedPackagesFromDb(repos)
 
@@ -116,23 +116,23 @@ proc makePrs() =
   # Use GitHub API to create/update the packages.json file
   let branch = "update-nim-community-urls-" & changedPkgs.join("-")
   let message = "Update registry URLs to nim-community repos"
-  
+
   # Ensure fork exists
   if not githubapi.ensureFork("nim-lang", "packages", Org):
     echo "Failed to fork nim-lang/packages for org '" & Org & "'"
     quit(1)
-  
+
   # Get current master branch SHA
   let masterRef = githubapi.getRef(Org, "packages", "heads/master")
   if masterRef.isNil:
     echo "Failed to get master branch reference"
     quit(1)
-  
+
   let masterSha = masterRef["object"]["sha"].getStr
 
   # Create new branch
   let branchRef = "refs/heads/" & branch
-  
+
   # Check if branch already exists
   if githubapi.branchExists(Org, "packages", branch):
     echo "Branch " & branch & " already exists, skipping creation"
@@ -140,7 +140,7 @@ proc makePrs() =
     if not githubapi.createRef(Org, "packages", branchRef, masterSha):
       echo "Failed to create branch " & branch
       quit(1)
-  
+
   # Get current packages.json file
   let (currentContent, fileSha) = githubapi.getFileContents(Org, "packages", "packages.json", "master")
 
@@ -161,8 +161,8 @@ proc makePrs() =
     if not success:
       echo "Failed to create packages.json"
       quit(1)
-  
-  
+
+
   # Create PR
   let names = changedPkgs.join(", ")
   let prTitle = "Update registry URLs for " & names
@@ -192,7 +192,7 @@ proc dryRun() =
   let original = pkgs.pretty.cleanupWhitespace
   # Store packages in SimpleDB
   storePackagesInDb(pkgs.copy)
-  
+
   # Get changed packages using SimpleDB query
   let changedPkgs = getChangedPackagesFromDb(repos)
 
@@ -247,6 +247,7 @@ proc dryRun() =
 
 proc run() =
   removeFile("packages.db")
+  discard syncFork("nim-community", "packages", "master")
   makePrs()
 
 when isMainModule:
