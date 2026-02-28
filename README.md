@@ -65,12 +65,6 @@ Executes the full migration process:
 
 
 
-#### Create Pull Requests
-```bash
-nimherd makePrs
-```
-Creates pull requests for packages that have been updated.
-
 ## How It Works
 
 1. **Repository Discovery**: Fetches all repositories from the `nim-community` GitHub organization
