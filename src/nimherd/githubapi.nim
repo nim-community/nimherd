@@ -144,7 +144,7 @@ proc getFileContents*(org, repo, path: string, refName = "main"): (string, strin
       if s.len > 0:
         let j = parseJson(s)
         if j.hasKey("content") and j.hasKey("sha"):
-          let content = j["content"].getStr.decode()
+          let content = j["content"].getStr.replace("\n", "").decode()
           let sha = j["sha"].getStr
           return (content, sha)
   return ("", "")
