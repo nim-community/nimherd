@@ -525,18 +525,14 @@ proc printHealthStatus*(filter: string = "problems", limit: int = 100) =
   
   # Determine what to show based on filter
   var showDeprecated = false
-  var showFailed = false
   
   case filter.toLower():
   of "all", "problems", "issues":
     showDeprecated = deprecatedPkgs > 0
-    showFailed = failedPkgs > 0
   of "deprecated", "dead":
     showDeprecated = true
-    showFailed = false
   of "failed", "errors":
     showDeprecated = false
-    showFailed = true
   of "ok", "success":
     echo "\nUse 'problems' filter to see issues."
     return
@@ -545,7 +541,7 @@ proc printHealthStatus*(filter: string = "problems", limit: int = 100) =
     echo "Available: problems, deprecated, failed, all"
     return
   
-  # Show deprecated packages
+  # Show deprecated packages (only list deprecated, not failed)
   if showDeprecated and deprecatedPkgs > 0:
     echo "\n🔴 Deprecated Packages (404/410 - Recommend Removal)"
     echo "─────────────────────────────────────────────────────────"
@@ -561,41 +557,129 @@ proc printHealthStatus*(filter: string = "problems", limit: int = 100) =
     if deprecatedPkgs > limit:
       echo "  ... and ", deprecatedPkgs - limit, " more"
   
-  # Show failed packages
-  if showFailed and failedPkgs > 0:
-    echo "\n⚠️  Failed Packages (Network/Server Errors)"
-    echo "─────────────────────────────────────────────────────────"
-    var count = 0
-    for row in healthDb.rows(sql"""
-      SELECT name, url, http_status, access_error 
-      FROM package_health 
-      WHERE http_status = 0 OR (http_status >= 400 AND http_status NOT IN (404, 410))
-      ORDER BY http_status DESC, name 
-      LIMIT ?
-    """, limit):
-      if count >= limit: break
-      let pkgName = row[0]
-      let pkgUrl = row[1]
-      let status = parseInt(row[2])
-      let error = row[3]
-      let statusDesc = getStatusDescription(status)
-      echo "  • ", pkgName
-      if status == 0:
-        echo "    ", error
-      else:
-        echo "    ", pkgUrl, " (", status, " ", statusDesc, ")"
-      inc count
-    if failedPkgs > limit:
-      echo "  ... and ", failedPkgs - limit, " more"
-  
   # Actionable summary
   if deprecatedPkgs > 0 or failedPkgs > 0:
     echo "\n💡 Recommendations:"
     if deprecatedPkgs > 0:
       echo "   • Run 'remove-deprecated' to create PR for removing deprecated packages"
     if failedPkgs > 0:
-      echo "   • Failed packages may be temporary issues - re-run 'check-pkg-health' to verify"
+      echo "   • ", failedPkgs, " packages have network/server errors (may be temporary)"
+      echo "   • Run 'retry-failed' to re-check these packages"
     echo ""
+
+proc retryFailedPackages*(concurrentRequests = 10) =
+  ## Re-check packages that previously failed (status 0 or >= 400 excluding 404/410)
+  echo "Loading previously failed packages from health database..."
+  
+  let healthDb = initHealthDatabase()
+  defer: healthDb.close()
+  
+  # Get all failed packages
+  var failedPackages: seq[tuple[name, url: string]] = @[]
+  for row in healthDb.rows(sql"""
+    SELECT name, url FROM package_health 
+    WHERE http_status = 0 OR (http_status >= 400 AND http_status NOT IN (404, 410))
+    ORDER BY name
+  """):
+    failedPackages.add((name: row[0], url: row[1]))
+  
+  if failedPackages.len == 0:
+    echo "No failed packages found in database."
+    echo "All packages are healthy!"
+    return
+  
+  echo "Found ", failedPackages.len, " failed packages to retry"
+  
+  var stillFailed: seq[string] = @[]
+  var nowOk: seq[string] = @[]
+  var newlyDeprecated: seq[string] = @[]
+  
+  # Re-check each failed package
+  proc recheckPackage(pkgName, pkgUrl: string): tuple[status: int, error: string] =
+    try:
+      let client = newHttpClient(timeout = 10000)
+      defer: client.close()
+      
+      let parsedUrl = parseUri(pkgUrl)
+      if parsedUrl.scheme == "":
+        return (0, "Invalid URL scheme")
+      
+      let response = client.request(pkgUrl, httpMethod = HttpHead)
+      let statusCode = response.code.int
+      return (statusCode, "")
+      
+    except CatchableError as e:
+      return (0, e.msg)
+  
+  echo "\nRetrying with ", min(concurrentRequests, failedPackages.len), " concurrent requests..."
+  
+  var processed = 0
+  for pkg in failedPackages:
+    let (status, error) = recheckPackage(pkg.name, pkg.url)
+    let lastAccess = format(now(), "yyyy-MM-dd'T'HH:mm:ss'Z'")
+    
+    # Update database
+    if status == 0:
+      healthDb.exec(sql"""
+        UPDATE package_health 
+        SET http_status = 0, last_access_time = ?, access_error = ?
+        WHERE name = ?
+      """, lastAccess, error, pkg.name)
+      stillFailed.add(pkg.name & " (" & error & ")")
+    elif status == 404 or status == 410:
+      healthDb.exec(sql"""
+        UPDATE package_health 
+        SET http_status = ?, last_access_time = ?, access_error = ''
+        WHERE name = ?
+      """, status, lastAccess, pkg.name)
+      newlyDeprecated.add(pkg.name & " (" & $status & ")")
+    elif status >= 400:
+      healthDb.exec(sql"""
+        UPDATE package_health 
+        SET http_status = ?, last_access_time = ?, access_error = ''
+        WHERE name = ?
+      """, status, lastAccess, pkg.name)
+      stillFailed.add(pkg.name & " (" & $status & ")")
+    else:
+      healthDb.exec(sql"""
+        UPDATE package_health 
+        SET http_status = ?, last_access_time = ?, access_error = ''
+        WHERE name = ?
+      """, status, lastAccess, pkg.name)
+      nowOk.add(pkg.name)
+    
+    inc processed
+    if processed mod 10 == 0:
+      echo "Progress: ", processed, "/", failedPackages.len
+  
+  echo "\n✅ Retry complete!"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "Fixed:     ", nowOk.len, " packages now OK"
+  if newlyDeprecated.len > 0:
+    echo "Deprecated:", newlyDeprecated.len, " packages became deprecated (404/410)"
+  if stillFailed.len > 0:
+    echo "Still bad: ", stillFailed.len, " packages still failing"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  if nowOk.len > 0 and nowOk.len <= 10:
+    echo "\nPackages now OK:"
+    for name in nowOk:
+      echo "  ✓ ", name
+  elif nowOk.len > 10:
+    echo "\nFirst 10 packages now OK:"
+    for i in 0..<10:
+      echo "  ✓ ", nowOk[i]
+    echo "  ... and ", nowOk.len - 10, " more"
+  
+  if newlyDeprecated.len > 0 and newlyDeprecated.len <= 5:
+    echo "\nPackages now deprecated:"
+    for name in newlyDeprecated:
+      echo "  🔴 ", name
+  elif newlyDeprecated.len > 5:
+    echo "\nFirst 5 packages now deprecated:"
+    for i in 0..<5:
+      echo "  🔴 ", newlyDeprecated[i]
+    echo "  ... and ", newlyDeprecated.len - 5, " more"
 
 proc removeDeprecated*(dryRun = false) =
   ## Remove deprecated packages (404/410 status) from packages.json and create PR
@@ -751,5 +835,6 @@ when isMainModule:
     [dryRun, cmdName = "dry-run"],
     [checkPackageHealth, cmdName = "check-pkg-health"],
     [printHealthStatus, cmdName = "print-health"],
+    [retryFailedPackages, cmdName = "retry-failed"],
     [removeDeprecated, cmdName = "remove-deprecated"],
   )
