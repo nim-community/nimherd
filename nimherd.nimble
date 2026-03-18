@@ -14,4 +14,4 @@ bin           = @["nimherd"]
 requires "dotenv"
 requires "cligen"
 requires "https://github.com/mark-summerfield/diff-nim"
-requires "https://github.com/jjv360/nim-simpledb"
+requires "njsdb"

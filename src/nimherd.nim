@@ -2,23 +2,25 @@
 import std/[httpclient, json, strutils, os, tables, times, uri, math, httpcore, algorithm, sets]
 import dotenv
 import cligen
-import simpledb,diff
+import njsdb
+import diff
 import db_connector/db_sqlite
 import nimherd/[githubapi,pretty_json]
 
 const Org = "nim-community"
 
-proc initDatabase(): SimpleDB =
-  result = SimpleDB.init("packages.db")
+proc initDatabase(): NJSDB =
+  result = newNJSDB()
+  result.open("packages.db")
+  discard result.collection("packages")
 
-proc storePackagesInDb(db: SimpleDB, packages: JsonNode) =
-  # Store each package as a document using batch transaction
-  db.batch do():
-    for pkg in packages:
-      if pkg.hasKey("name"):
-        db.put(pkg)
+proc storePackagesInDb(db: NJSDB, packages: JsonNode) =
+  # Store each package as a document
+  for pkg in packages:
+    if pkg.hasKey("name"):
+      db.put(pkg)
 
-proc getChangedPackagesFromDb(db: SimpleDB, forkedRepos: seq[JsonNode]): seq[string] =
+proc getChangedPackagesFromDb(db: NJSDB, forkedRepos: seq[JsonNode]): seq[string] =
   ## Returns a list of package names that have changed URLs in the database.
   for forkedRepo in forkedRepos:
     let repoName = forkedRepo["name"].getStr
@@ -463,112 +465,137 @@ proc checkPackageHealth*(concurrentRequests = 10, forceCheck = false) =
   for status, count in finalStatusCounts:
     echo "  ", status, ": ", count
 
-proc printHealthStatus*(filter: string = "all", limit: int = 100, sortBy: string = "name") =
-  ## Print package health status from the database
-  echo "Loading package health data from database..."
-  
+proc getStatusDescription(status: int): string =
+  ## Get human-readable description for HTTP status code
+  case status:
+  of 0: "Network/Timeout Error"
+  of 200: "OK"
+  of 301, 302, 307, 308: "Redirect"
+  of 400: "Bad Request"
+  of 401: "Unauthorized"
+  of 403: "Forbidden"
+  of 404: "Not Found (Deprecated)"
+  of 410: "Gone (Deprecated)"
+  of 429: "Rate Limited"
+  of 500: "Server Error"
+  of 502: "Bad Gateway"
+  of 503: "Service Unavailable"
+  of 504: "Gateway Timeout"
+  else:
+    if status >= 200 and status < 300: "OK"
+    elif status >= 300 and status < 400: "Redirect"
+    elif status >= 400 and status < 500: "Client Error"
+    elif status >= 500: "Server Error"
+    else: "Unknown"
+
+proc printHealthStatus*(filter: string = "problems", limit: int = 100) =
+  ## Print package health status - concise format showing only problematic packages
   let healthDb = initHealthDatabase()
   defer: healthDb.close()
   
-  # Get health records based on filter using SQLite queries
-  var healthRecords: seq[JsonNode] = @[]
-  var sqlQuery: SqlQuery
+  # Get summary statistics
+  let statsRow = healthDb.getRow(sql"""
+    SELECT 
+      COUNT(*),
+      SUM(CASE WHEN http_status BETWEEN 200 AND 399 THEN 1 ELSE 0 END),
+      SUM(CASE WHEN http_status IN (404, 410) THEN 1 ELSE 0 END),
+      SUM(CASE WHEN http_status = 0 OR (http_status >= 400 AND http_status NOT IN (404, 410)) THEN 1 ELSE 0 END)
+    FROM package_health
+  """)
+  
+  let totalPkgs = if statsRow[0] != "": parseInt(statsRow[0]) else: 0
+  let successPkgs = if statsRow[1] != "": parseInt(statsRow[1]) else: 0
+  let deprecatedPkgs = if statsRow[2] != "": parseInt(statsRow[2]) else: 0
+  let failedPkgs = if statsRow[3] != "": parseInt(statsRow[3]) else: 0
+  
+  if totalPkgs == 0:
+    echo "No health records found. Run 'check-pkg-health' first."
+    return
+  
+  # Print summary
+  echo "\n📊 Package Health Summary"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "Total:    ", totalPkgs
+  echo "✅ OK:     ", successPkgs, " (", (successPkgs * 100 div totalPkgs), "%)"
+  if deprecatedPkgs > 0:
+    echo "🔴 Deprecated:", deprecatedPkgs, " (", (deprecatedPkgs * 100 div totalPkgs), "%)"
+  if failedPkgs > 0:
+    echo "⚠️  Failed:  ", failedPkgs, " (", (failedPkgs * 100 div totalPkgs), "%)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Determine what to show based on filter
+  var showDeprecated = false
+  var showFailed = false
   
   case filter.toLower():
-  of "all":
-    sqlQuery = sql"SELECT json_data FROM package_health ORDER BY name LIMIT ?"
-    for row in healthDb.rows(sqlQuery, limit):
-      healthRecords.add(parseJson(row[0]))
+  of "all", "problems", "issues":
+    showDeprecated = deprecatedPkgs > 0
+    showFailed = failedPkgs > 0
   of "deprecated", "dead":
-    sqlQuery = sql"SELECT json_data FROM package_health WHERE http_status IN (404, 410) ORDER BY name LIMIT ?"
-    for row in healthDb.rows(sqlQuery, limit):
-      healthRecords.add(parseJson(row[0]))
+    showDeprecated = true
+    showFailed = false
   of "failed", "errors":
-    # Get packages with status 0 or >= 400 (excluding 404/410)
-    sqlQuery = sql"""
-      SELECT json_data FROM package_health 
-      WHERE http_status = 0 OR (http_status >= 400 AND http_status NOT IN (404, 410))
-      ORDER BY name LIMIT ?
-    """
-    for row in healthDb.rows(sqlQuery, limit):
-      healthRecords.add(parseJson(row[0]))
-  of "success", "ok":
-    # Get packages with successful status (200-399)
-    sqlQuery = sql"SELECT json_data FROM package_health WHERE http_status BETWEEN 200 AND 399 ORDER BY name LIMIT ?"
-    for row in healthDb.rows(sqlQuery, limit):
-      healthRecords.add(parseJson(row[0]))
+    showDeprecated = false
+    showFailed = true
+  of "ok", "success":
+    echo "\nUse 'problems' filter to see issues."
+    return
   else:
     echo "Unknown filter: ", filter
-    echo "Available filters: all, deprecated, failed, success"
+    echo "Available: problems, deprecated, failed, all"
     return
   
-  if healthRecords.len == 0:
-    echo "No health records found in database. Run 'check-pkg-health' first to populate the database."
-    return
+  # Show deprecated packages
+  if showDeprecated and deprecatedPkgs > 0:
+    echo "\n🔴 Deprecated Packages (404/410 - Recommend Removal)"
+    echo "─────────────────────────────────────────────────────────"
+    var count = 0
+    for row in healthDb.rows(sql"SELECT name, url, http_status FROM package_health WHERE http_status IN (404, 410) ORDER BY name LIMIT ?", limit):
+      if count >= limit: break
+      let pkgName = row[0]
+      let pkgUrl = row[1]
+      let status = parseInt(row[2])
+      echo "  • ", pkgName
+      echo "    ", pkgUrl, " (", status, " ", getStatusDescription(status), ")"
+      inc count
+    if deprecatedPkgs > limit:
+      echo "  ... and ", deprecatedPkgs - limit, " more"
   
-  echo "Found ", healthRecords.len, " packages with filter: ", filter
+  # Show failed packages
+  if showFailed and failedPkgs > 0:
+    echo "\n⚠️  Failed Packages (Network/Server Errors)"
+    echo "─────────────────────────────────────────────────────────"
+    var count = 0
+    for row in healthDb.rows(sql"""
+      SELECT name, url, http_status, access_error 
+      FROM package_health 
+      WHERE http_status = 0 OR (http_status >= 400 AND http_status NOT IN (404, 410))
+      ORDER BY http_status DESC, name 
+      LIMIT ?
+    """, limit):
+      if count >= limit: break
+      let pkgName = row[0]
+      let pkgUrl = row[1]
+      let status = parseInt(row[2])
+      let error = row[3]
+      let statusDesc = getStatusDescription(status)
+      echo "  • ", pkgName
+      if status == 0:
+        echo "    ", error
+      else:
+        echo "    ", pkgUrl, " (", status, " ", statusDesc, ")"
+      inc count
+    if failedPkgs > limit:
+      echo "  ... and ", failedPkgs - limit, " more"
   
-  # Sort records using system sort
-  case sortBy.toLower():
-  of "name":
-    healthRecords.sort(proc(a, b: JsonNode): int =
-      cmp(a["name"].getStr, b["name"].getStr))
-  of "status", "http_status":
-    healthRecords.sort(proc(a, b: JsonNode): int =
-      cmp(a["http_status"].getInt, b["http_status"].getInt))
-  of "time", "last_access":
-    healthRecords.sort(proc(a, b: JsonNode): int =
-      cmp(a["last_access_time"].getStr, b["last_access_time"].getStr))
-  
-  # When using a filter (not "all"), just print name and URL
-  if filter.toLower() != "all":
-    for record in healthRecords:
-      if not record.hasKey("name") or not record.hasKey("url"):
-        continue
-      let pkgName = record["name"].getStr
-      let pkgUrl = record["url"].getStr
-      echo pkgName, " ", pkgUrl
-    return
-  
-  # Print header for "all" filter
-  echo "\n=== Package Health Status ==="
-  echo "Name                          | Status | Last Access         "
-  echo "----------------------------------------------------------"
-  
-  # Print records
-  var deprecatedCount = 0
-  var failedCount = 0
-  var successCount = 0
-  
-  for record in healthRecords:
-    if not record.hasKey("name") or not record.hasKey("http_status"):
-      continue
-      
-    let pkgName = record["name"].getStr
-    let status = record["http_status"].getInt
-    let lastAccess = if record.hasKey("last_access_time"): record["last_access_time"].getStr else: "Never"
-    
-    let statusStr = if status == 0: "ERROR" else: $status
-    let statusColor = if status == 404 or status == 410: "DEPRECATED" 
-                     elif status >= 400 or status == 0: "FAILED"
-                     else: "OK"
-    
-    case statusColor:
-    of "DEPRECATED": inc deprecatedCount
-    of "FAILED": inc failedCount
-    of "OK": inc successCount
-    
-    # Format the output with fixed width columns
-    let nameCol = if pkgName.len > 30: pkgName[0..27] & ".." else: pkgName
-    let statusCol = if statusStr.len > 6: statusStr[0..5] else: statusStr
-    let accessCol = if lastAccess.len > 20: lastAccess[0..19] else: lastAccess
-    
-    echo nameCol & repeat(" ", 30 - nameCol.len), " | ", 
-        repeat(" ", 6 - statusCol.len) & statusCol, " | ", 
-        accessCol & repeat(" ", 20 - accessCol.len)
-   
-  echo "----------------------------------------------------------"
-  echo "Summary: ", successCount, " OK, ", deprecatedCount, " Deprecated, ", failedCount, " Failed"
+  # Actionable summary
+  if deprecatedPkgs > 0 or failedPkgs > 0:
+    echo "\n💡 Recommendations:"
+    if deprecatedPkgs > 0:
+      echo "   • Run 'remove-deprecated' to create PR for removing deprecated packages"
+    if failedPkgs > 0:
+      echo "   • Failed packages may be temporary issues - re-run 'check-pkg-health' to verify"
+    echo ""
 
 proc removeDeprecated*(dryRun = false) =
   ## Remove deprecated packages (404/410 status) from packages.json and create PR

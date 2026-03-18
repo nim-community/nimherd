@@ -2,6 +2,7 @@
 !**/
 !*.*
 nimbledeps/
+nimble.paths
 _work_nim_community/
 output.json
 *.db
